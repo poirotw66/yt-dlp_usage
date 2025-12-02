@@ -1,40 +1,229 @@
-import os
+import argparse
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Dict, Any, List, Tuple, Optional
+
 import pandas as pd
-from youtube_downloader import download_video
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def main():
-    # 讀取 Excel 檔案
-    df = pd.read_excel('google_next_sessions.xlsx')
-    url_column = 'YouTube URL'
-    output_dir = './downloads/google_next_sessions_video'
-    resolution = '720p'
+from youtube_downloader import download_video
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
 
-    urls = []
-    for idx, row in df.iterrows():
-        url = row.get(url_column)
+DEFAULT_SETTINGS: Dict[str, Any] = {
+    'input_path': 'google_next_sessions.xlsx',
+    'sheet_name': None,
+    'url_column': 'YouTube URL',
+    'output_dir': './downloads/google_next_sessions_video',
+    'resolution': '720p',
+    'max_workers': 4,
+    'max_retries': 3,
+    'retry_delay': 5,
+    'log_file': None,
+    'limit': None,
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description='批次下載 Excel 清單中的 YouTube 影片'
+    )
+    parser.add_argument('--config', help='JSON 設定檔路徑')
+    parser.add_argument('-i', '--input-path', help='Excel 檔案路徑')
+    parser.add_argument('-s', '--sheet-name', help='Excel 表單名稱或索引')
+    parser.add_argument('-c', '--url-column', help='儲存 YouTube URL 的欄位名稱')
+    parser.add_argument('-o', '--output-dir', help='輸出資料夾')
+    parser.add_argument('-r', '--resolution', help='下載解析度，例: 720p、1080p、highest')
+    parser.add_argument('-w', '--max-workers', type=int, help='並行下載的工作緒數')
+    parser.add_argument('-l', '--limit', type=int, help='僅下載前 N 筆記錄')
+    parser.add_argument('--max-retries', type=int, help='單筆失敗時的重試次數')
+    parser.add_argument('--retry-delay', type=int, help='重試前等待的秒數')
+    parser.add_argument('--log-file', help='將日誌寫入指定檔案')
+    return parser.parse_args()
+
+
+def load_config(config_path: Optional[str]) -> Dict[str, Any]:
+    if not config_path:
+        return {}
+    try:
+        with open(config_path, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+            if not isinstance(data, dict):
+                raise ValueError('設定檔必須是 JSON 物件')
+            return data
+    except FileNotFoundError as exc:
+        raise SystemExit(f'找不到設定檔: {config_path}') from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f'設定檔解析失敗: {config_path}') from exc
+
+
+def resolve_settings(args: argparse.Namespace) -> Dict[str, Any]:
+    settings = DEFAULT_SETTINGS.copy()
+    settings.update(load_config(getattr(args, 'config', None)))
+
+    for key, value in vars(args).items():
+        if key == 'config' or value is None:
+            continue
+        settings[key] = value
+
+    # argparse 使用 dash，將其轉為底線以符合程式內部 key
+    normalized_settings = {
+        key.replace('-', '_'): value for key, value in settings.items()
+    }
+
+    normalized_settings['output_dir'] = str(normalized_settings['output_dir'])
+    normalized_settings['input_path'] = str(normalized_settings['input_path'])
+    log_path = normalized_settings.get('log_file')
+    if log_path is not None:
+        normalized_settings['log_file'] = str(log_path)
+
+    limit_value = normalized_settings.get('limit')
+    if limit_value is not None:
+        normalized_settings['limit'] = int(limit_value)
+
+    sheet_value = normalized_settings.get('sheet_name')
+    if isinstance(sheet_value, str) and sheet_value.isdigit():
+        normalized_settings['sheet_name'] = int(sheet_value)
+
+    normalized_settings['max_workers'] = int(normalized_settings['max_workers'])
+    normalized_settings['max_retries'] = int(normalized_settings['max_retries'])
+    normalized_settings['retry_delay'] = int(normalized_settings['retry_delay'])
+
+    return normalized_settings
+
+
+def read_urls_from_excel(
+    input_path: str,
+    sheet_name: Optional[str],
+    url_column: str,
+    limit: Optional[int],
+) -> List[Tuple[int, str]]:
+    try:
+        df = pd.read_excel(
+            input_path,
+            sheet_name=sheet_name if sheet_name not in (None, '') else 0,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(f'找不到 Excel 檔案: {input_path}') from exc
+
+    if url_column not in df.columns:
+        available = ', '.join(df.columns)
+        raise SystemExit(
+            f'欄位 "{url_column}" 不存在，請確認 Excel。可用欄位: {available}'
+        )
+
+    urls: List[Tuple[int, str]] = []
+    for idx, url in enumerate(df[url_column], start=1):
         if isinstance(url, str) and url.strip():
-            urls.append((idx+1, url))
+            urls.append((idx, url.strip()))
         else:
-            print(f'第 {idx+1} 筆無有效 YouTube URL，略過')
+            print(f'第 {idx} 筆無有效 YouTube URL，略過')
 
-    # 並行下載
-    max_workers = 4  # 可依照你電腦網路/CPU調整
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    if limit is not None:
+        urls = urls[:limit]
+
+    return urls
+
+
+def setup_logging(log_file: Optional[str]) -> None:
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding='utf-8'))
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=handlers,
+        force=True,
+    )
+
+
+def download_with_retry(
+    url: str,
+    output_dir: str,
+    resolution: str,
+    max_retries: int,
+    retry_delay: int,
+) -> Optional[str]:
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = download_video(url, output_dir, resolution)
+            if result:
+                return result
+            raise RuntimeError('下載函式未回傳檔案路徑')
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt < max_retries:
+                logging.warning(
+                    '下載失敗，將於 %d 秒後重試 (%d/%d): %s',
+                    retry_delay,
+                    attempt,
+                    max_retries,
+                    url,
+                )
+                time.sleep(retry_delay)
+            else:
+                break
+    if last_error:
+        raise last_error
+    raise RuntimeError('下載失敗且無可用錯誤訊息')
+
+
+def main() -> None:
+    args = parse_args()
+    settings = resolve_settings(args)
+
+    setup_logging(settings.get('log_file'))
+
+    Path(settings['output_dir']).mkdir(parents=True, exist_ok=True)
+
+    urls = read_urls_from_excel(
+        settings['input_path'],
+        settings.get('sheet_name'),
+        settings['url_column'],
+        settings.get('limit'),
+    )
+
+    if not urls:
+        logging.info('沒有有效的下載目標，結束。')
+        return
+
+    logging.info('批次下載設定:')
+    for key in ('input_path', 'sheet_name', 'url_column', 'output_dir', 'resolution', 'max_workers', 'limit', 'max_retries', 'retry_delay', 'log_file'):
+        logging.info('  %s: %s', key, settings.get(key))
+
+    total = len(urls)
+    completed = 0
+    failed = 0
+
+    with ThreadPoolExecutor(max_workers=int(settings['max_workers'])) as executor:
         future_to_url = {
-            executor.submit(download_video, url, output_dir, resolution): (idx, url)
+            executor.submit(
+                download_with_retry,
+                url,
+                settings['output_dir'],
+                settings['resolution'],
+                settings['max_retries'],
+                settings['retry_delay'],
+            ): (idx, url)
             for idx, url in urls
         }
         for future in as_completed(future_to_url):
             idx, url = future_to_url[future]
             try:
-                future.result()
-                print(f'第 {idx} 筆下載完成')
-            except Exception as e:
-                print(f'第 {idx} 筆下載失敗: {url}，錯誤訊息: {e}')
+                result = future.result()
+                completed += 1
+                logging.info('(%d/%d) 第 %d 筆下載完成: %s', completed + failed, total, idx, result or '無檔名')
+            except Exception as exc:
+                failed += 1
+                logging.error('(%d/%d) 第 %d 筆下載失敗: %s，錯誤訊息: %s', completed + failed, total, idx, url, exc)
+
+    logging.info('批次完成，成功 %d 筆，失敗 %d 筆', completed, failed)
+
 
 if __name__ == '__main__':
     main()
