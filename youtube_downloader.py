@@ -14,7 +14,11 @@ import argparse
 import re
 import urllib.parse
 import time
+import logging
 import yt_dlp
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 def clean_url(url):
     """
@@ -53,7 +57,7 @@ def validate_youtube_url(url):
         video_id_match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', url)
         if video_id_match:
             video_id = video_id_match.group(1)
-            print(f"從 URL 中提取到視頻 ID: {video_id}")
+            logger.info("從 URL 中提取到視頻 ID: %s", video_id)
             return True
     
     return youtube_match is not None
@@ -73,11 +77,11 @@ def download_video(url, output_path=None, resolution='highest'):
     try:
         # 清理 URL
         url = clean_url(url)
-        print(f"處理後的 URL: {url}")
+        logger.info("處理後的 URL: %s", url)
         
         # 驗證 URL
         if not validate_youtube_url(url):
-            print(f"錯誤: '{url}' 不是有效的 YouTube URL")
+            logger.error("錯誤: '%s' 不是有效的 YouTube URL", url)
             return None
         
         # 設置輸出路徑
@@ -109,28 +113,28 @@ def download_video(url, output_path=None, resolution='highest'):
         # 獲取影片信息
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
-            print(f"影片標題: {info.get('title', '未知')}")
-            print(f"影片作者: {info.get('uploader', '未知')}")
-            print(f"影片長度: {info.get('duration', '未知')} 秒")
+            logger.info("影片標題: %s", info.get('title', '未知'))
+            logger.info("影片作者: %s", info.get('uploader', '未知'))
+            logger.info("影片長度: %s 秒", info.get('duration', '未知'))
         
         # 下載影片
-        print(f"開始下載影片，解析度: {resolution}")
-        print(f"保存到: {output_path}")
+        logger.info("開始下載影片，解析度: %s", resolution)
+        logger.info("保存到: %s", output_path)
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             # 獲取下載的文件路徑
             if info:
                 filename = ydl.prepare_filename(info)
-                print(f"下載完成: {filename}")
+                logger.info("下載完成: %s", filename)
                 return filename
             else:
-                print("下載失敗，未能獲取影片信息")
+                logger.error("下載失敗，未能獲取影片信息")
                 return None
     
     except Exception as e:
-        print(f"下載過程中發生錯誤: {str(e)}")
-        print("提示: 請檢查網絡連接，或嘗試更新 yt-dlp 庫 (pip install --upgrade yt-dlp)")
+        logger.exception("下載過程中發生錯誤: %s", str(e))
+        logger.info("提示: 請檢查網絡連接，或嘗試更新 yt-dlp 庫 (pip install --upgrade yt-dlp)")
         return None
 
 def download_audio(url, output_path=None):
@@ -147,11 +151,11 @@ def download_audio(url, output_path=None):
     try:
         # 清理 URL
         url = clean_url(url)
-        print(f"處理後的 URL: {url}")
+        logger.info("處理後的 URL: %s", url)
         
         # 驗證 URL
         if not validate_youtube_url(url):
-            print(f"錯誤: '{url}' 不是有效的 YouTube URL")
+            logger.error("錯誤: '%s' 不是有效的 YouTube URL", url)
             return None
         
         # 設置輸出路徑
@@ -180,12 +184,12 @@ def download_audio(url, output_path=None):
         # 獲取影片信息
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
-            print(f"影片標題: {info.get('title', '未知')}")
-            print(f"影片作者: {info.get('uploader', '未知')}")
+            logger.info("影片標題: %s", info.get('title', '未知'))
+            logger.info("影片作者: %s", info.get('uploader', '未知'))
         
         # 下載音頻
-        print(f"開始下載音頻")
-        print(f"保存到: {output_path}")
+        logger.info("開始下載音頻")
+        logger.info("保存到: %s", output_path)
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -195,19 +199,23 @@ def download_audio(url, output_path=None):
                 filename = ydl.prepare_filename(info)
                 base, _ = os.path.splitext(filename)
                 mp3_filename = base + '.mp3'
-                print(f"下載完成: {mp3_filename}")
+                logger.info("下載完成: %s", mp3_filename)
                 return mp3_filename
             else:
-                print("下載失敗，未能獲取音頻信息")
+                logger.error("下載失敗，未能獲取音頻信息")
                 return None
     
     except Exception as e:
-        print(f"下載過程中發生錯誤: {str(e)}")
-        print("提示: 請檢查網絡連接，或嘗試更新 yt-dlp 庫 (pip install --upgrade yt-dlp)")
+        logger.exception("下載過程中發生錯誤: %s", str(e))
+        logger.info("提示: 請檢查網絡連接，或嘗試更新 yt-dlp 庫 (pip install --upgrade yt-dlp)")
         return None
 
 def main():
     """主函數"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+    )
     parser = argparse.ArgumentParser(description='下載 YouTube 影片')
     parser.add_argument('url', help='YouTube 影片 URL')
     parser.add_argument('-o', '--output', help='輸出路徑', default='./downloads/google_next_sessions')
